@@ -17,3 +17,12 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated outputs
+output/
+
+# Vector database
+qdrant_data/
+
+# Claude Code
+.claude/

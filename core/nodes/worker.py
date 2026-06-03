@@ -14,6 +14,7 @@ llm = ChatOpenAI(
     base_url=os.getenv("BASE_URL"),
     model=os.getenv("PROCESS_MODEL"),
     temperature=0.1,      # 低温保证代码逻辑严谨
+    max_tokens=16384,
     max_retries=8,
     timeout=60
 )
@@ -66,8 +67,12 @@ def worker_node(state: AgentState):
     previous_outputs = ""
     if exec_box.stage_outputs:
         previous_outputs = "【已完成的前置任务成果参考——请确保新代码与以下代码兼容】\n"
-        for t_id, code in exec_box.stage_outputs.items():
-            previous_outputs += f"--- 子任务 {t_id} 代码 ---\n{code}\n\n"
+        for t_id, output in exec_box.stage_outputs.items():
+            if isinstance(output, dict):
+                for path, code in output.get("files", {}).items():
+                    previous_outputs += f"--- 子任务 {t_id} 产出 {path} ---\n{code}\n\n"
+            else:
+                previous_outputs += f"--- 子任务 {t_id} 代码 ---\n{output}\n\n"
 
     # 检查有没有上次沙盒返回的报错——这是"打工人觉醒"的关键
     error_feedback = ""
@@ -119,7 +124,7 @@ def worker_node(state: AgentState):
             t.result = "代码已生成，等待沙盒验证"
 
     # 将生成的代码存入档案馆（供后续子任务参考）
-    exec_box.stage_outputs[task_id] = clean_code
+    exec_box.stage_outputs[task_id] = {"files": {"main.py": clean_code}, "main": "main.py"}
     # 进度条向前推进一格
     exec_box.current_task_index += 1
 
