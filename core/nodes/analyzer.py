@@ -194,28 +194,8 @@ read_file / write_file / run_command / web_search
     ]
 }
 """
-    
-    # 调用模型，传入完整的最近对话历史
-    """
-    【输出格式】
 
-    {
-    "need_clarification": false,
-    "task_complexity": "simple/complex",
-    "reasoning": ["拆解理由1", "拆解理由2"],
-    "required_resources": ["write_file", "run_command"],
-    "task_plan": [
-        {
-            "task_id": 1,
-            "description": "子任务描述",
-            "objective": "子任务目标",
-            "dependencies": [],
-            "risk_level": "low/medium/high",
-            "risk_reason": "风险评估原因"
-        }
-    ]
-    }
-    """
+    # 调用模型，传入完整的最近对话历史
     # ---- RAG 检索：从向量库获取相似历史经验 ----
     user_request = ""
     for msg in recent_messages:

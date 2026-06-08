@@ -77,7 +77,9 @@ class ExecutionContext(BaseModel):
     all_tasks_completed: bool = False     # 所有子任务是否完成
     
     error_trace: str = ""                 # 沙盒运行返回的报错
-    retry_count: int = 0                  # 记录因为报错重写的次数
+    retry_count: int = 0                  # 记录因为报错重写的总次数（保留向后兼容）
+    task_retry_count: dict = Field(default_factory=dict)  # 按子任务 ID 的独立重试计数 {task_id: count}
+    max_retry_per_task: int = 3           # 每个子任务的最大重试次数
     installed_libraries: List[str] = Field(default_factory=list)  # 已成功安装的第三方库
     missing_libraries: List[str] = Field(default_factory=list)    # 安装/校验失败的库
 
@@ -170,6 +172,9 @@ class AgentState(MessagesState):
     # think → act 节点间传递（LangGraph 必须定义在 schema 中才能传递）
     _pending_thought: str = ""
     _pending_tool_calls: list = Field(default_factory=list)  # [{name, args}, ...]
+
+    # 当前正在被 ReAct 处理的子任务 ID（用于确保 think/judge 与 start_react 一致）
+    _current_task_id: int = 0
 
     # ==================================
     # 整合 + 输出阶段状态

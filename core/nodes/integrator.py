@@ -279,13 +279,15 @@ def integrator_node(state: AgentState):
 
         # 如果 LLM 要求重新生成
         if review.get("requires_regeneration"):
-            logger.warning(f"[整合] ⚠️ LLM 合并发现严重接口冲突，打回重写")
+            logger.warning(f"[整合] ⚠️ LLM 合并发现严重接口冲突，打回所有已完成任务重写")
             if plan_box and plan_box.task_plan:
+                reset_count = 0
                 for t in plan_box.task_plan:
                     if t.status == "finished":
                         t.status = "pending"
                         t.result = f"整合审核未通过：{review.get('remaining_conflicts', [])}"
-                        break
+                        reset_count += 1
+                logger.warning(f"[整合] 已打回 {reset_count} 个已完成任务")
             integration.integration_done = False
             integration.conflicts = conflicts + review.get("remaining_conflicts", [])
             return {"integration": integration, "planning": plan_box}

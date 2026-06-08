@@ -99,45 +99,69 @@ def route_after_sandbox(state: AgentState) -> str:
     """
     sandbox 之后的分叉——主图的核心决策点：
 
-    沙盒刚测完一个子任务，结果可能是通过或失败：
-    1. 重试次数超限（≥3次）→ 强制终止，标记失败
-    2. 还有 sub_task.status == "pending"（刚验证失败）
-       → executor 重入修复
-    3. 还有 sub_task.status == "testing"（等验证但还没轮到）
-       → 继续沙盒验证
-    4. 全部 finished
-       → 结束
+    沙盒刚测完子任务，结果可能是通过或失败：
+    1. 重试次数超限（≥max_retry_per_task/任务）→ 强制终止，标记失败
+    2. testing → 优先清空验证队列，让沙盒连续测完
+    3. pending（含 failed + not_started）→ 验证队列清空后统一打回 executor
+    4. 全部 finished → 整合
+
+    关键设计：testing 优先于 pending。
+    如果 pending（失败待修复）优先，executor 可能因上游还在 testing 而空转一轮；
+    testing 优先则先让沙盒把能过的都过了，解锁下游依赖，executor 有更多工作可做。
     """
     plan_box = state.get("planning")
     exec_box = state.get("execution")
 
-    # 优先级 0：重试次数上限——防止任何形式的无限循环
-    if exec_box and exec_box.retry_count >= 3:
+    # 优先级 0：按子任务独立重试上限——防止单个任务无限重试
+    max_retry = exec_box.max_retry_per_task if exec_box else 3
+    over_limit_tasks = [
+        tid for tid, cnt in (exec_box.task_retry_count if exec_box else {}).items()
+        if cnt >= max_retry
+    ]
+    if over_limit_tasks:
         logger.error(
-            f"[主图路由] ⛔ 重试次数已达上限（{exec_box.retry_count} 次），"
-            f"强制终止未完成的任务"
+            f"[主图路由] ⛔ 子任务 {over_limit_tasks} 重试次数已达上限（{max_retry} 次/任务），"
+            f"全局总重试 {exec_box.retry_count} 次，强制终止这些任务"
         )
         for t in plan_box.task_plan:
-            if t.status in ("pending", "testing"):
+            if t.task_id in over_limit_tasks and t.status in ("pending", "testing"):
                 t.status = "failed"
                 t.result = (
-                    f"重试超限（{exec_box.retry_count} 次）\n"
+                    f"子任务 {t.task_id} 重试超限（{exec_box.task_retry_count[t.task_id]} 次）\n"
                     f"最后报错：{exec_box.error_trace[:500] if exec_box.error_trace else '无'}"
                 )
-        logger.info("[主图路由] 重试超限，转入整合（保留已完成的任务）")
-        return "integrator"
+        # 检查是否还有其他待处理任务
+        remaining = [t for t in plan_box.task_plan if t.status in ("pending", "testing")]
+        if not remaining:
+            logger.info("[主图路由] 所有待处理任务均已处理，转入整合")
+            return "integrator"
+        logger.info(f"[主图路由] 仍有 {len(remaining)} 个任务待处理，继续执行")
+        # 非超限任务继续进入下一优先级判断
+        non_over_limit = [t for t in remaining if t.task_id not in over_limit_tasks]
+        if non_over_limit:
+            # 继续往下走 testing/pending 判断（不直接 return executor）
+            pass
+        else:
+            # 只剩下超限 testing → 标记失败后结束
+            for t in [t for t in remaining if t.task_id in over_limit_tasks]:
+                t.status = "failed"
+                t.result = (
+                    f"子任务 {t.task_id} 重试超限（{exec_box.task_retry_count.get(t.task_id, 0)} 次）\n"
+                    f"最后报错：{exec_box.error_trace[:500] if exec_box.error_trace else '无'}"
+                )
+            return "integrator"
 
-    # 优先级 1：有失败的任务需要修复
-    pending = [t for t in plan_box.task_plan if t.status == "pending"]
-    if pending:
-        logger.warning(f"[主图路由] 检测到 {len(pending)} 个子任务未通过，打回重写")
-        return "executor"
-
-    # 优先级 2：还有等待验证的任务
+    # 🌟 优先级 1：先清空验证队列！只要还有待验证的任务，就让沙盒继续咬牙测完
     testing = [t for t in plan_box.task_plan if t.status == "testing"]
     if testing:
-        logger.info(f"[主图路由] 还有 {len(testing)} 个子任务待验证，继续测试")
+        logger.info(f"[主图路由] 还有 {len(testing)} 个子任务待验证，保持沙盒队列连续测试...")
         return "sandbox"
+
+    # 🌟 优先级 2：队列清空后，一揽子盘点有没有失败的任务，统一打回车间集中重修
+    pending = [t for t in plan_box.task_plan if t.status == "pending"]
+    if pending:
+        logger.warning(f"[主图路由] 沙盒队列测完，检测到 {len(pending)} 个子任务未通过，集中打回重写")
+        return "executor"
 
     # 全部完成
     logger.info("[主图路由] 所有子任务均已通过测试，进入整合阶段")

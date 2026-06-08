@@ -51,6 +51,14 @@ load_dotenv()
 
 MAX_REACT_ROUNDS = 10
 
+# ── 截断常量（防止 LLM 上下文窗口被大文件撑爆）────────────────────
+SNAPSHOT_HEAD = 15000       # 文件快照：头部保留字符数
+SNAPSHOT_TAIL = 10000       # 文件快照：尾部保留字符数
+SNAPSHOT_LIMIT = SNAPSHOT_HEAD + SNAPSHOT_TAIL  # 25000
+PREVIOUS_OUTPUT_LIMIT = 20000   # 前置任务代码截断阈值
+ERROR_TRACE_LIMIT = 25000       # 沙盒报错截断阈值
+TOOL_OUTPUT_LIMIT = 25000       # 工具输出截断阈值
+
 # ReAct 专用 LLM（需要复杂推理，temperature 稍高）
 llm = ChatOpenAI(
     api_key=os.getenv("LLM_API_KEY"),
@@ -76,14 +84,29 @@ def _build_tool_description(allowed_tools: list = None) -> str:
     return "\n".join(lines)
 
 
-def _build_current_files_snapshot(react_history: list) -> str:
+def _build_current_files_snapshot(react_history: list, base_output: dict = None) -> str:
     """
-    从 ReAct 历史中重建本子任务当前文件状态。
-    不扫描磁盘 —— 只追踪 write_file 和 edit_file 调用，
+    从 ReAct 历史 + 上一轮遗留文件（修复模式）中重建本子任务当前文件状态。
+    不扫描磁盘 —— 只追踪 write_file / edit_file / delete_file / move_file 调用，
     按时间线正向演进文件内容，为模型提供一个"自己刚做了什么"的精确视图。
-    防止模型因为遗忘自己写过的代码而反复调用 read_file 空转。
+
+    修复模式下 base_output 继承上一轮的 stage_outputs[task_id]，
+    打通记忆：模型能看到上轮自己写了什么，再叠加本轮改动，避免失忆。
     """
-    file_states = {}  # path -> {content, source, chars, lines}
+    # ── 初始化：修复模式从 base_output 继承上一轮的文件底子 ──
+    file_states: dict[str, dict] = {}
+    inherited_count = 0
+    if base_output and isinstance(base_output, dict):
+        base_files = base_output.get("files", {})
+        for path, content in base_files.items():
+            if content:
+                file_states[path] = {
+                    "content": content,
+                    "source": "[上一轮遗留]",
+                    "chars": len(content),
+                    "lines": content.count("\n") + (1 if content and not content.endswith("\n") else 0),
+                }
+        inherited_count = len(file_states)
 
     for i, step in enumerate(react_history):
         # 解析 action
@@ -102,11 +125,11 @@ def _build_current_files_snapshot(react_history: list) -> str:
         if not isinstance(params, dict):
             continue
 
-        path = params.get("path", "")
-        if not path:
-            continue
-
+        # ── write_file ──
         if tool_name == "write_file":
+            path = params.get("path", "")
+            if not path:
+                continue
             content = params.get("content", "")
             file_states[path] = {
                 "content": content,
@@ -114,7 +137,12 @@ def _build_current_files_snapshot(react_history: list) -> str:
                 "chars": len(content),
                 "lines": content.count("\n") + (1 if content and not content.endswith("\n") else 0),
             }
+
+        # ── edit_file ──
         elif tool_name == "edit_file":
+            path = params.get("path", "")
+            if not path:
+                continue
             old_str = params.get("old_string", "")
             new_str = params.get("new_string", "")
             if path in file_states:
@@ -128,14 +156,45 @@ def _build_current_files_snapshot(react_history: list) -> str:
                         "lines": updated.count("\n") + (1 if updated and not updated.endswith("\n") else 0),
                     }
 
+        # ── delete_file ──
+        elif tool_name == "delete_file":
+            path = params.get("path", "")
+            if path and path in file_states:
+                del file_states[path]
+
+        # ── move_file (rename / relocate) ──
+        elif tool_name == "move_file":
+            src = params.get("source", "")
+            tgt = params.get("target", "")
+            if src and tgt and src in file_states:
+                info = file_states.pop(src)
+                info["source"] = info["source"] + f"→第{i+1}轮移动至 {tgt}"
+                file_states[tgt] = info
+
     if not file_states:
+        if inherited_count > 0:
+            return "【📂 本子任务文件状态】\n（上轮遗留文件已在修复轮中被全部删除，尚未创建新文件）\n"
         return "【📂 本子任务文件状态】\n（尚未创建或修改任何文件）\n"
 
+    # ── 构建输出：头尾双截断（防止大文件后半截完全不可见）──
     lines = ["【📂 本子任务当前文件状态（根据操作历史重建，不含前置子任务文件）】"]
+    if inherited_count > 0:
+        lines.append(f"（已从上一轮继承 {inherited_count} 个文件，本轮操作在此基础上增量演进）")
+
     for path, info in file_states.items():
-        preview = info["content"][:25000]
-        if len(info["content"]) > 25000:
-            preview += f"\n... (共 {info['chars']} 字符, {info['lines']} 行, 已截断前 25000 字符)"
+        content = info["content"]
+        if len(content) > SNAPSHOT_LIMIT:
+            head = content[:SNAPSHOT_HEAD]
+            tail = content[-SNAPSHOT_TAIL:]
+            omitted = len(content) - SNAPSHOT_HEAD - SNAPSHOT_TAIL
+            preview = (
+                f"{head}\n\n"
+                f"⸻ [省略中间 {omitted} 字符] ⸻\n\n"
+                f"{tail}\n"
+                f"(文件共 {info['chars']} 字符, {info['lines']} 行，已展示头部 {SNAPSHOT_HEAD} + 尾部 {SNAPSHOT_TAIL} 字符)"
+            )
+        else:
+            preview = content
         lines.append(f"\n── {path}  ({info['source']}, {info['chars']}字符, {info['lines']}行) ──")
         lines.append(preview)
 
@@ -149,14 +208,15 @@ def _build_react_prompt(
     error_feedback: str,
     react_history: list,
     current_round: int,
-    allowed_tools: list = None
+    allowed_tools: list = None,
+    base_output: dict = None
 ) -> str:
     """构建经过过滤压缩的读写分离提示词"""
     tool_desc = _build_tool_description(allowed_tools)
     total_steps = len(react_history)
 
-    # ── 本子任务文件状态快照（从操作历史重建，防止模型遗忘）──
-    current_files = _build_current_files_snapshot(react_history)
+    # ── 本子任务文件状态快照（从操作历史 + 上轮遗留重建，防止模型遗忘）──
+    current_files = _build_current_files_snapshot(react_history, base_output)
 
     # 历史步骤
     history_text = ""
@@ -219,16 +279,61 @@ def start_react_node(state: AgentState):
     if exec_box is None:
         exec_box = ExecutionContext()
 
-    finished_ids = {t.task_id for t in plan_box.task_plan if t.status in ("testing", "finished")}
+    # 防御：重置残留的 "doing" 任务（进程崩溃/中断后可能残留），避免永久死锁
+    stale_doing = [t for t in plan_box.task_plan if t.status == "doing"]
+    if stale_doing:
+        logger.warning(f"[ReAct入口] 检测到残留 {len(stale_doing)} 个 'doing' 任务，重置为 pending")
+        for t in stale_doing:
+            t.status = "pending"
+
+    # 仅 "finished" 满足依赖——"testing" 尚未验证通过，下游不得基于它编码
+    finished_ids = {t.task_id for t in plan_box.task_plan if t.status == "finished"}
+    failed_ids = {t.task_id for t in plan_box.task_plan if t.status == "failed"}
     pending_tasks = [t for t in plan_box.task_plan if t.status == "pending"]
-    ready = [t for t in pending_tasks if not t.dependencies or all(dep in finished_ids for dep in t.dependencies)]
+    ready = [t for t in pending_tasks if not t.dependencies or all(
+        dep in finished_ids for dep in t.dependencies
+    )]
+
+    # 依赖断裂降级：依赖了失败任务的 pending 任务自动标记为失败
+    for t in pending_tasks:
+        if t in ready:
+            continue
+        broken_deps = [d for d in t.dependencies if d in failed_ids]
+        if broken_deps:
+            logger.warning(
+                f"[ReAct入口] 子任务 {t.task_id} 依赖了失败的任务 {broken_deps}，"
+                f"自动标记为失败（依赖断裂）"
+            )
+            t.status = "failed"
+            t.result = (
+                f"依赖断裂：前置子任务 {broken_deps} 已失败，"
+                f"当前任务无法执行"
+            )
+
+    # 重新计算 ready（排除刚被标记为 failed 的任务）
+    ready = [t for t in plan_box.task_plan if t.status == "pending" and (
+        not t.dependencies or all(dep in finished_ids for dep in t.dependencies)
+    )]
 
     if not ready:
         exec_box.all_tasks_completed = True
         return {"execution": exec_box, "react_finished": True}
 
     task = ready[0]
-    logger.info(f"[ReAct入口] 开始处理子任务 {task.task_id}: {task.description}")
+
+    # ── 区分「全新编码」还是「修复重写」──
+    is_repair = bool(task.result)  # result 非空 = 之前沙盒失败过，带着报错回来
+
+    # 全新编码 → 清除上一任务的残留报错，防止误注入
+    if not is_repair:
+        exec_box.error_trace = ""
+
+    # 标记为 "doing" 并锁定 _current_task_id，保证 think/judge 操作的是同一个任务
+    task.status = "doing"
+    logger.info(
+        f"[ReAct入口] 开始处理子任务 {task.task_id}: {task.description}"
+        f"{' [修复模式]' if is_repair else ''}"
+    )
 
     return {
         "execution": exec_box,
@@ -236,7 +341,8 @@ def start_react_node(state: AgentState):
         "react_history": [],
         "react_blocked": False,
         "react_block_reason": "",
-        "react_finished": False
+        "react_finished": False,
+        "_current_task_id": task.task_id,
     }
 
 
@@ -245,11 +351,21 @@ def think_node(state: AgentState):
     exec_box = state.get("execution")
     round_num = state.get("react_round", 0) + 1
 
-    pending_tasks = [t for t in plan_box.task_plan if t.status == "pending"]
-    if not pending_tasks:
-        return {"react_finished": True}
-
-    task = pending_tasks[0]
+    # 用 _current_task_id 锁定任务——防止与 start_react 选的不是同一个
+    task_id = state.get("_current_task_id", 0)
+    task = None
+    if task_id:
+        for t in plan_box.task_plan:
+            if t.task_id == task_id:
+                task = t
+                break
+    # 兜底：_current_task_id 未设置（不应发生，但做个防御）
+    if task is None:
+        logger.warning(f"[ReAct-Think] _current_task_id={task_id} 未找到对应任务，回退到 pending[0]")
+        pending_tasks = [t for t in plan_box.task_plan if t.status == "pending"]
+        if not pending_tasks:
+            return {"react_finished": True}
+        task = pending_tasks[0]
 
     # ── 恢复精简的结构化 previous_outputs（来自前置子任务成果）──
     previous_outputs = ""
@@ -259,11 +375,22 @@ def think_node(state: AgentState):
             if isinstance(output, dict):
                 files = output.get("files", {})
                 for path, code in files.items():
-                    previous_outputs += f"--- 子任务 {t_id} 产出 {path} ---\n{code[:25000]}\n\n"
+                    if len(code) > PREVIOUS_OUTPUT_LIMIT:
+                        truncated = code[:PREVIOUS_OUTPUT_LIMIT]
+                        truncated += (
+                            f"\n\n⚠️ [系统提示] 此文件共 {len(code)} 字符，"
+                            f"以上仅展示前 {PREVIOUS_OUTPUT_LIMIT} 字符。"
+                            f"如需查看完整内容，请使用 read_file 读取 {path}。"
+                        )
+                        previous_outputs += f"--- 子任务 {t_id} 产出 {path} ---\n{truncated}\n\n"
+                    else:
+                        previous_outputs += f"--- 子任务 {t_id} 产出 {path} ---\n{code}\n\n"
 
+    # ── 仅修复模式注入 error_trace（全新编码不注入，防止读到其他任务的残留报错）──
     error_feedback = ""
-    if exec_box.error_trace:
-        error_feedback = f"【⚠️ 上次沙盒验证报错——需要修复】\n{exec_box.error_trace[:25000]}\n"
+    is_repair = bool(task.result)  # result 非空 = 沙盒失败后回来修复
+    if is_repair and exec_box.error_trace:
+        error_feedback = f"【⚠️ 上次沙盒验证报错——需要修复】\n{exec_box.error_trace[:ERROR_TRACE_LIMIT]}\n"
 
     react_history = state.get("react_history", [])
 
@@ -273,11 +400,14 @@ def think_node(state: AgentState):
         logger.warning(f"[ReAct-Think] 🚨 第 {round_num} 轮触发工具强制裁剪！仅保留 write/edit/submit")
         allowed_tools = [t for t in ALL_TOOLS if t.name in ["write_file", "edit_file", "submit_task"]]
 
+    # ── 修复模式下继承上轮遗留文件，让快照"不失忆" ──
+    base_output = exec_box.stage_outputs.get(task.task_id) if exec_box and exec_box.stage_outputs else None
+
     prompt = _build_react_prompt(
         task_description=task.description, task_objective=task.objective,
         previous_outputs=previous_outputs, error_feedback=error_feedback,
         react_history=react_history, current_round=round_num,
-        allowed_tools=allowed_tools
+        allowed_tools=allowed_tools, base_output=base_output
     )
 
     force_submit = state.get("force_submit", False)
@@ -395,7 +525,7 @@ def act_node(state: AgentState):
         result = execute_tool(name, **args)
         tool_call = ToolCall(
             tool_name=name, tool_input=args,
-            tool_output=result[:25000], timestamp=datetime.now().isoformat()
+            tool_output=result[:TOOL_OUTPUT_LIMIT], timestamp=datetime.now().isoformat()
         )
 
         step = ReActStep(thought=thought if i == 0 else "", action=tool_call, observation=result)
@@ -419,11 +549,17 @@ def judge_node(state: AgentState):
     react_finished = state.get("react_finished", False)
     react_history = state.get("react_history", [])
 
-    pending_tasks = [t for t in plan_box.task_plan if t.status == "pending"]
-    if not pending_tasks:
+    # 用 _current_task_id 锁定任务——与 start_react / think 保持一致
+    task_id = state.get("_current_task_id", 0)
+    task = None
+    if task_id:
+        for t in plan_box.task_plan:
+            if t.task_id == task_id:
+                task = t
+                break
+    if task is None:
+        logger.warning(f"[ReAct-Judge] _current_task_id={task_id} 未找到对应任务，跳过裁决")
         return {}
-
-    task = pending_tasks[0]
 
     if react_finished:
         logger.info(f"[ReAct-Judge] 子任务 {task.task_id} ReAct 完成")
@@ -450,6 +586,7 @@ def judge_node(state: AgentState):
 
     if round_num >= MAX_REACT_ROUNDS:
         logger.warning(f"[ReAct-Judge] 子任务 {task.task_id} 达到 {MAX_REACT_ROUNDS} 轮上限，暂停等待人工介入")
+        task.status = "pending"  # "doing" → "pending"，等待人工决策
         task.result = f"ReAct 循环达上限（{MAX_REACT_ROUNDS} 轮），等待人工介入"
 
         partial_files = _extract_files(react_history, exec_box.stage_outputs.get(task.task_id, {}))
@@ -491,9 +628,10 @@ def judge_node(state: AgentState):
 def _extract_files(react_history: list, base_output: dict = None) -> dict:
     """
     完美文件演进提取器。
-    正序遍历历史：write_file 创建/覆盖，edit_file 就地替换。
+    正序遍历历史：write_file 创建/覆盖，edit_file 就地替换，
+    delete_file 删除，move_file 移动/重命名。
     从 base_output（前置子任务成果）继承初始文件状态，
-    按时间线正向演进，确保 edit_file 的修改不丢失。
+    按时间线正向演进，确保增量修改不丢失。
     """
     if not react_history:
         return base_output or {}
@@ -515,20 +653,40 @@ def _extract_files(react_history: list, base_output: dict = None) -> dict:
         if not isinstance(params, dict):
             continue
 
-        path = params.get("path", "")
-        if not path:
-            continue
-
         if tool_name == "write_file":
+            path = params.get("path", "")
+            if not path:
+                continue
             content = params.get("content", "")
             files[path] = content
             if not main:
                 main = path
+
         elif tool_name == "edit_file":
+            path = params.get("path", "")
+            if not path:
+                continue
             old_str = params.get("old_string", "")
             new_str = params.get("new_string", "")
             if path in files and old_str in files[path]:
                 files[path] = files[path].replace(old_str, new_str, 1)
+
+        elif tool_name == "delete_file":
+            path = params.get("path", "")
+            if path and path in files:
+                del files[path]
+                if main == path:
+                    # 入口文件被删，选取剩余第一个作为新的 main
+                    remaining = list(files.keys())
+                    main = remaining[0] if remaining else ""
+
+        elif tool_name == "move_file":
+            src = params.get("source", "")
+            tgt = params.get("target", "")
+            if src and tgt and src in files:
+                files[tgt] = files.pop(src)
+                if main == src:
+                    main = tgt
 
     return {"files": files, "main": main}
 

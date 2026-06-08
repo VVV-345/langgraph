@@ -31,19 +31,19 @@ def init_container() -> bool:
     os.makedirs(WORKSPACE_HOST, exist_ok=True)
 
     result = subprocess.run(
-        f'docker ps -a --filter name={CONTAINER_NAME} --format "{{{{.Status}}}}"',
-        shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        ["docker", "ps", "-a", "--filter", f"name={CONTAINER_NAME}", "--format", "{{.Status}}"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     status = result.stdout.strip()
 
     if not status:
         logger.info(f"[Docker沙盒] 创建新容器 {CONTAINER_NAME}（镜像: {IMAGE}）...")
         result = subprocess.run(
-            f'docker run -d --name {CONTAINER_NAME} '
-            f'-v "{WORKSPACE_HOST}:{WORKSPACE_CONTAINER}" '
-            f'-w {WORKSPACE_CONTAINER} '
-            f'{IMAGE} tail -f /dev/null',
-            shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            ["docker", "run", "-d", "--name", CONTAINER_NAME,
+             "-v", f"{WORKSPACE_HOST}:{WORKSPACE_CONTAINER}",
+             "-w", WORKSPACE_CONTAINER,
+             IMAGE, "tail", "-f", "/dev/null"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
         if result.returncode != 0:
             logger.error(f"[Docker沙盒] 容器创建失败: {result.stderr}")
@@ -57,18 +57,23 @@ def init_container() -> bool:
 
     # 存在但停止了 → 重启
     logger.info(f"[Docker沙盒] 重启容器 {CONTAINER_NAME}...")
-    subprocess.run(f"docker start {CONTAINER_NAME}", shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    subprocess.run(
+        ["docker", "start", CONTAINER_NAME],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
     return True
 
 
 def docker_exec(command: str, cwd: str = WORKSPACE_CONTAINER, timeout: int = 60) -> dict:
-    """在容器中执行命令，返回 {"stdout": ..., "stderr": ..., "returncode": ...}"""
+    """在容器中执行命令，返回 {"stdout": ..., "stderr": ..., "returncode": ...}
+
+    使用 subprocess.run 参数列表模式（shell=False），命令字符串作为 sh -c 的
+    文字参数直接传递给容器，宿主机 shell 不参与解析，杜绝注入风险。
+    """
     try:
-        # 转义双引号，防止 sh -c "..." 内部引号冲突
-        escaped = command.replace("\\", "\\\\").replace('"', '\\"')
         result = subprocess.run(
-            f'docker exec -w {cwd} {CONTAINER_NAME} sh -c "{escaped}"',
-            shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            ["docker", "exec", "-w", cwd, CONTAINER_NAME, "sh", "-c", command],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=timeout,
         )
         return {
@@ -84,17 +89,16 @@ def docker_exec(command: str, cwd: str = WORKSPACE_CONTAINER, timeout: int = 60)
 
 def docker_exec_background(command: str, cwd: str = WORKSPACE_CONTAINER) -> int | None:
     """在容器后台启动进程，返回容器内 PID"""
-    escaped = command.replace("\\", "\\\\").replace('"', '\\"')
     result = subprocess.run(
-        f'docker exec -d -w {cwd} {CONTAINER_NAME} sh -c "{escaped}"',
-        shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        ["docker", "exec", "-d", "-w", cwd, CONTAINER_NAME, "sh", "-c", command],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if result.returncode != 0:
         return None
     # 获取容器内最后启动的进程 PID
     pid_result = subprocess.run(
-        f'docker exec {CONTAINER_NAME} sh -c "pgrep -f \'{command}\' | tail -1"',
-        shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        ["docker", "exec", CONTAINER_NAME, "sh", "-c", f"pgrep -f '{command}' | tail -1"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     try:
         return int(pid_result.stdout.strip()) if pid_result.stdout.strip() else None
@@ -105,8 +109,8 @@ def docker_exec_background(command: str, cwd: str = WORKSPACE_CONTAINER) -> int 
 def docker_kill(pid: int) -> bool:
     """杀掉容器内指定 PID 的进程"""
     result = subprocess.run(
-        f"docker exec {CONTAINER_NAME} kill {pid}",
-        shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        ["docker", "exec", CONTAINER_NAME, "kill", str(pid)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     return result.returncode == 0
 

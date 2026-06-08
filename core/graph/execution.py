@@ -100,20 +100,54 @@ def route_after_analyzer(state: AgentState) -> str:
 
 def route_after_worker(state: AgentState) -> str:
     """
-    worker 之后的分叉——编码循环的控制核心：
-    - ReAct 阻塞（需要人工介入）→ 退出子图，交给主图处理
-    - 还有 pending 子任务 → 继续循环编码
-    - 所有任务都已处理（testing/finished）→ 退出子图，交给主图验证
+    worker 之后的分叉——依赖感知调度：
+
+    核心逻辑：
+    - ReAct 阻塞 → 退出子图
+    - 所有任务已处理 → 退出子图
+    - 有 pending 任务，但下一个就绪任务的依赖尚未被沙盒验证（status=testing）
+      → 退出子图，先让沙盒验证上游，避免基于未验证代码继续编码
+    - 下一个就绪任务的所有依赖都是 finished（或没有依赖）
+      → 继续循环编码（批量处理无依赖/已验证任务）
+
+    简言之：有依赖链的任务逐个串行（编码→验证→下一个），
+    无依赖关系的任务保持批量并行。
     """
     if state.get("react_blocked", False):
         logger.info("[执行子图] ReAct 阻塞，退出子图等待人工介入")
         return "end"
+
     plan_box = state.get("planning")
     pending = [t for t in plan_box.task_plan if t.status == "pending"]
-    if pending:
+    if not pending:
+        logger.info("[执行子图] 全部子任务编码完毕，交给主图验证")
+        return "end"
+
+    # 找出下一个能满足依赖的就绪任务
+    finished_ids = {t.task_id for t in plan_box.task_plan if t.status == "finished"}
+    testing_ids = {t.task_id for t in plan_box.task_plan if t.status == "testing"}
+
+    for task in pending:
+        deps_ok = not task.dependencies or all(d in finished_ids for d in task.dependencies)
+        if not deps_ok:
+            continue  # 依赖未满足，跳过
+
+        # 此任务可以编码——检查它的依赖中是否有 testing 的
+        depends_on_testing = any(d in testing_ids for d in task.dependencies)
+        if depends_on_testing:
+            logger.info(
+                f"[执行子图] 子任务 {task.task_id} 依赖 {task.dependencies}，"
+                f"其中 {[d for d in task.dependencies if d in testing_ids]} 尚未验证，"
+                f"退出子图等待沙盒先验证上游"
+            )
+            return "end"
+
+        # 无依赖或依赖已全部验证 → 继续编码
         logger.info(f"[执行子图] 还有 {len(pending)} 个子任务待编码，继续...")
         return "worker"
-    logger.info("[执行子图] 全部子任务编码完毕，交给主图验证")
+
+    # 所有 pending 的依赖都未满足（等 testing 变 finished）
+    logger.info("[执行子图] 所有待编码任务依赖未满足，退出等待沙盒验证")
     return "end"
 
 

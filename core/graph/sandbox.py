@@ -116,6 +116,7 @@ def sandbox_node(state: AgentState):
         target_task.result = "沙盒执行异常"
         exec_box.error_trace = str(e)
         exec_box.retry_count += 1
+        exec_box.task_retry_count[task_id] = exec_box.task_retry_count.get(task_id, 0) + 1
 
     return {"planning": plan_box, "execution": exec_box}
 
@@ -138,6 +139,7 @@ def _test_cli(task_id, target_task, exec_box, cwd: str, main_file: str):
         target_task.result = "沙盒测试未通过，等待修复"
         exec_box.error_trace = error_msg
         exec_box.retry_count += 1
+        exec_box.task_retry_count[task_id] = exec_box.task_retry_count.get(task_id, 0) + 1
 
 
 def _test_web_service(task_id, target_task, exec_box, cwd: str, main_file: str, files: dict):
@@ -151,6 +153,7 @@ def _test_web_service(task_id, target_task, exec_box, cwd: str, main_file: str, 
         target_task.result = "Web 服务后台启动失败"
         exec_box.error_trace = "docker exec -d 启动失败"
         exec_box.retry_count += 1
+        exec_box.task_retry_count[task_id] = exec_box.task_retry_count.get(task_id, 0) + 1
         return
 
     logger.debug(f"[沙盒验证] Web 服务 PID={pid}，等待就绪...")
@@ -178,6 +181,7 @@ def _test_web_service(task_id, target_task, exec_box, cwd: str, main_file: str, 
         target_task.result = f"Web 服务未返回 200（HTTP {http_code}）"
         exec_box.error_trace = f"Web 服务测试: {test_url} → {http_code}\n{logs['stdout'][:500]}"
         exec_box.retry_count += 1
+        exec_box.task_retry_count[task_id] = exec_box.task_retry_count.get(task_id, 0) + 1
 
     # 3. 杀掉服务进程
     docker_exec(f"kill {pid}", cwd=cwd, timeout=5)

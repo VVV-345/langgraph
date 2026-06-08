@@ -9,22 +9,18 @@
 
 【三个职责】
     1. 拓扑排序：根据 SubTask.dependencies 做 Kahn 算法排序
-    2. 依赖就绪检查：每次选任务时检查其依赖是否全部完成
+    2. 依赖就绪检查 + 依赖断裂降级：在 ReAct worker 的 start_react 中完成
     3. 资源校验：对照 required_resources 和已注册工具，缺资源时告警
 
 【使用方式】
-    from core.nodes.scheduler import scheduler_node, get_next_ready_task
+    from core.nodes.scheduler import scheduler_node
 
-    # 作为节点一次调用
     state = scheduler_node(state)
-
-    # 后续每次选任务时调用
-    next_task = get_next_ready_task(state)
 =============================================================================
 """
 
 from collections import deque
-from typing import Optional, List, Tuple
+from typing import List, Tuple
 
 from core.state import AgentState, SubTask
 from core.tools import TOOL_BY_NAME
@@ -96,50 +92,6 @@ def topological_sort(tasks: List[SubTask]) -> Tuple[List[SubTask], bool]:
 
 # ==========================================================================
 # 依赖就绪检查
-# ==========================================================================
-
-def get_next_ready_task(state: AgentState) -> Optional[SubTask]:
-    """
-    找到下一个「就绪」的子任务：
-    条件1: status == "pending"
-    条件2: 所有 dependencies 对应的任务都是 "finished"
-
-    参数:
-        state: 当前 AgentState
-
-    返回:
-        就绪的子任务，没有则返回 None
-    """
-    plan_box = state.get("planning")
-    if not plan_box or not plan_box.task_plan:
-        return None
-
-    for task in plan_box.task_plan:
-        if task.status != "pending":
-            continue
-
-        # 检查所有依赖是否已完成
-        deps_ready = True
-        for dep_id in task.dependencies:
-            dep_task = _find_task_by_id(plan_box.task_plan, dep_id)
-            if dep_task is None or dep_task.status != "finished":
-                deps_ready = False
-                break
-
-        if deps_ready:
-            return task
-
-    return None
-
-
-def _find_task_by_id(task_plan: List[SubTask], task_id: int) -> Optional[SubTask]:
-    """在 task_plan 中按 task_id 查找"""
-    for t in task_plan:
-        if t.task_id == task_id:
-            return t
-    return None
-
-
 # ==========================================================================
 # 资源校验
 # ==========================================================================

@@ -236,8 +236,9 @@ def output_node(state: AgentState):
     os.makedirs(output_dir, exist_ok=True)
     logger.info(f"[输出] 输出目录：{output_dir}")
 
-    # Step 4: 写入代码文件
+    # Step 4: 写入代码文件（逐文件 try/except，单文件失败不影响其他文件）
     files_written = []
+    failed_files = []
     for f in files:
         # 确保文件路径安全（防止路径穿越）
         safe_path = f.file_path.replace("\\", "/").lstrip("/")
@@ -245,57 +246,78 @@ def output_node(state: AgentState):
             safe_path = os.path.basename(safe_path)
             logger.warning(f"[输出] 检测到路径穿越尝试，已截断：{f.file_path} → {safe_path}")
 
-        full_path = os.path.join(output_dir, safe_path)
-        # 创建子目录（如有）
-        parent_dir = os.path.dirname(full_path)
-        if parent_dir and not os.path.exists(parent_dir):
-            os.makedirs(parent_dir, exist_ok=True)
+        try:
+            full_path = os.path.join(output_dir, safe_path)
+            # 创建子目录（如有）
+            parent_dir = os.path.dirname(full_path)
+            if parent_dir and not os.path.exists(parent_dir):
+                os.makedirs(parent_dir, exist_ok=True)
 
-        with open(full_path, "w", encoding="utf-8") as fh:
-            fh.write(f.content)
+            with open(full_path, "w", encoding="utf-8") as fh:
+                fh.write(f.content)
 
-        files_written.append(full_path)
-        logger.info(f"[输出] ✅ 已写入：{safe_path}（{len(f.content)} 字符）")
+            files_written.append(full_path)
+            logger.info(f"[输出] ✅ 已写入：{safe_path}（{len(f.content)} 字符）")
+        except OSError as e:
+            failed_files.append(safe_path)
+            logger.error(f"[输出] ❌ 写入失败 [{safe_path}]: {e}，跳过并继续")
+        except Exception as e:
+            failed_files.append(safe_path)
+            logger.error(f"[输出] ❌ 写入异常 [{safe_path}]: {e}，跳过并继续")
+
+    if failed_files:
+        logger.warning(f"[输出] {len(failed_files)} 个文件写入失败: {', '.join(failed_files)}")
 
     # Step 5: 如果有失败任务，写入 FAILURE_REPORT.md
     if plan_box:
         failed_tasks = [t for t in plan_box.task_plan if t.status == "failed"]
         if failed_tasks:
-            report_path = os.path.join(output_dir, "FAILURE_REPORT.md")
-            report_lines = [
-                "# ❌ 失败任务报告",
-                "",
-                f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                "",
-                "| 子任务 | 描述 | 失败原因 |",
-                "|--------|------|----------|",
-            ]
-            for t in failed_tasks:
-                reason = (t.result or "未知错误").replace("\n", "<br>").replace("|", "\\|")
-                report_lines.append(f"| {t.task_id} | {t.description[:80]} | {reason[:500]} |")
-            report_lines.append("")
-            report_lines.append("---")
-            report_lines.append(f"*共 {len(failed_tasks)} 个子任务失败，请根据以上报错修改需求或代码后重试。*")
-            with open(report_path, "w", encoding="utf-8") as rf:
-                rf.write("\n".join(report_lines))
-            files_written.append(report_path)
-            logger.info(f"[输出] ⚠️ 已写入失败报告：FAILURE_REPORT.md（{len(failed_tasks)} 个失败任务）")
+            try:
+                report_path = os.path.join(output_dir, "FAILURE_REPORT.md")
+                report_lines = [
+                    "# ❌ 失败任务报告",
+                    "",
+                    f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    "",
+                    "| 子任务 | 描述 | 失败原因 |",
+                    "|--------|------|----------|",
+                ]
+                for t in failed_tasks:
+                    reason = (t.result or "未知错误").replace("\n", "<br>").replace("|", "\\|")
+                    report_lines.append(f"| {t.task_id} | {t.description[:80]} | {reason[:500]} |")
+                report_lines.append("")
+                report_lines.append("---")
+                report_lines.append(f"*共 {len(failed_tasks)} 个子任务失败，请根据以上报错修改需求或代码后重试。*")
+                with open(report_path, "w", encoding="utf-8") as rf:
+                    rf.write("\n".join(report_lines))
+                files_written.append(report_path)
+                logger.info(f"[输出] ⚠️ 已写入失败报告：FAILURE_REPORT.md（{len(failed_tasks)} 个失败任务）")
+            except Exception as e:
+                logger.error(f"[输出] 写入 FAILURE_REPORT.md 失败: {e}")
 
     # Step 6: 写入 README.md
     readme_path = os.path.join(output_dir, "README.md")
-    with open(readme_path, "w", encoding="utf-8") as rh:
-        rh.write(readme_content)
-    files_written.append(readme_path)
-    logger.info(f"[输出] ✅ README 已写入：README.md")
+    try:
+        with open(readme_path, "w", encoding="utf-8") as rh:
+            rh.write(readme_content)
+        files_written.append(readme_path)
+        logger.info(f"[输出] ✅ README 已写入：README.md")
+    except Exception as e:
+        logger.error(f"[输出] 写入 README.md 失败: {e}")
+        readme_path = ""
 
-    # Step 6: 生成交付物清单
-    manifest_path = _generate_manifest(
-        output_dir, files, readme_path,
-        integration.merge_summary, project_name
-    )
-    files_written.append(manifest_path)
+    # Step 7: 生成交付物清单
+    try:
+        manifest_path = _generate_manifest(
+            output_dir, files, readme_path,
+            integration.merge_summary, project_name
+        )
+        files_written.append(manifest_path)
+    except Exception as e:
+        logger.error(f"[输出] 生成交付物清单失败: {e}")
+        manifest_path = ""
 
-    # Step 7: 更新 latest 指针（删除旧 latest，写新的 pointer 文件）
+    # Step 8: 更新 latest 指针
     latest_pointer = os.path.join(OUTPUT_ROOT, "latest.txt")
     try:
         with open(latest_pointer, "w", encoding="utf-8") as lp:
@@ -303,7 +325,7 @@ def output_node(state: AgentState):
     except Exception:
         pass  # latest pointer 不是关键路径
 
-    # Step 8: 填充 OutputContext
+    # Step 9: 填充 OutputContext
     output_ctx.output_dir = output_dir
     output_ctx.manifest_path = manifest_path
     output_ctx.readme_path = readme_path
