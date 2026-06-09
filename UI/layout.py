@@ -1,0 +1,333 @@
+"""
+=============================================================================
+UI/layout.py —— Gradio 界面布局 & CSS
+=============================================================================
+
+build_ui() 接收回调函数引用，返回组装好的 Gradio Blocks 实例。
+=============================================================================
+"""
+
+import gradio as gr
+
+
+# ==========================================================================
+# CSS（内嵌，方便 HF 部署）
+# ==========================================================================
+
+CUSTOM_CSS = """
+/* === 全局 === */
+.gradio-container {
+    max-width: 1400px !important;
+    margin: 0 auto !important;
+}
+
+/* === 聊天区域 === */
+#agent-chatbot {
+    border-radius: 8px !important;
+    border: 1px solid #e0e0e0 !important;
+}
+#agent-chatbot .bubble-wrap {
+    max-width: 100% !important;
+}
+#agent-chatbot .message-row {
+    font-size: 14px !important;
+}
+
+/* === 左侧面板 === */
+#left-panel {
+    background: #fafbfc;
+    color: #1a1a1a;
+    border-right: 1px solid #e0e0e0;
+    padding: 8px;
+    min-height: 600px;
+}
+/* 面板内组件强制深色文字（防止系统深色模式导致白字+浅底） */
+#left-panel textarea,
+#left-panel input,
+#left-panel label,
+#left-panel p,
+#left-panel div,
+#left-panel h3,
+#left-panel pre,
+#left-panel code,
+#left-panel b,
+#left-panel span {
+    color: #1a1a1a !important;
+}
+/* 只读 Textbox 文字可见 */
+#left-panel textarea[disabled],
+#left-panel textarea[readonly] {
+    color: #1a1a1a !important;
+    -webkit-text-fill-color: #1a1a1a !important;
+}
+
+/* === 右侧控制面板 === */
+#control-panel {
+    background: #fafbfc;
+    color: #1a1a1a;
+    border-left: 1px solid #e0e0e0;
+    padding: 8px;
+}
+/* 面板内组件强制深色文字 */
+#control-panel textarea,
+#control-panel input,
+#control-panel label,
+#control-panel p,
+#control-panel div,
+#control-panel h3,
+#control-panel pre,
+#control-panel code,
+#control-panel b,
+#control-panel span {
+    color: #1a1a1a !important;
+}
+#control-panel textarea[disabled],
+#control-panel textarea[readonly] {
+    color: #1a1a1a !important;
+    -webkit-text-fill-color: #1a1a1a !important;
+}
+
+/* === 介入面板高亮 === */
+#intervene-panel {
+    border: 2px solid #ff4d4f !important;
+    box-shadow: 0 0 12px rgba(255, 77, 79, 0.3) !important;
+    animation: pulse-border 2s infinite;
+}
+@keyframes pulse-border {
+    0% { box-shadow: 0 0 4px rgba(255, 77, 79, 0.15); }
+    50% { box-shadow: 0 0 16px rgba(255, 77, 79, 0.45); }
+    100% { box-shadow: 0 0 4px rgba(255, 77, 79, 0.15); }
+}
+
+/* === 代码区域 === */
+pre, code {
+    font-family: 'Fira Code', 'Consolas', monospace !important;
+    font-size: 12px !important;
+}
+
+/* === 按钮样式 === */
+#start-btn {
+    background: linear-gradient(135deg, #667eea, #764ba2) !important;
+    border: none !important;
+    color: white !important;
+    font-weight: bold !important;
+}
+#start-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4) !important;
+}
+
+/* === 状态文本 === */
+#status-text textarea {
+    font-weight: bold !important;
+    font-size: 13px !important;
+}
+"""
+
+
+# ==========================================================================
+# 布局构建
+# ==========================================================================
+
+def build_ui(
+    on_start,
+    on_clarify,
+    on_intervene,
+    on_action_change,
+    list_workspace_files,
+    list_sessions,
+):
+    """构建 Gradio Blocks 界面，接收回调函数引用"""
+
+    with gr.Blocks(
+        title="AI 编码代理控制台",
+        css=CUSTOM_CSS,
+        theme=gr.themes.Soft(),
+        fill_height=True,
+    ) as demo:
+        # 隐藏状态
+        agent_state = gr.State({})
+        thread_id_state = gr.State("")
+        is_interrupt_state = gr.State(False)
+
+        # 标题栏
+        gr.Markdown(
+            "# 🤖 AI 编码代理控制台\n"
+            "8 阶段流水线：感知 → 规划 → 调度 → 执行 → 验证 → 整合 → 输出 → 复盘"
+        )
+
+        # 三栏布局
+        with gr.Row(equal_height=True):
+            # 左栏：任务进度 + 沙盒文件
+            with gr.Column(scale=1, elem_id="left-panel"):
+                gr.Markdown("### 📋 任务进度")
+                task_progress = gr.HTML(
+                    value="<p style='color:#888'>暂无任务</p>",
+                    elem_id="task-progress",
+                )
+
+                gr.Markdown("---")
+                gr.Markdown("### 📂 沙盒文件")
+                file_tree = gr.Textbox(
+                    value="(工作区为空)",
+                    lines=14,
+                    interactive=False,
+                    show_label=False,
+                    elem_id="file-tree",
+                )
+
+                refresh_btn = gr.Button("🔄 刷新文件列表", size="sm", variant="secondary")
+
+            # 中栏：对话日志
+            with gr.Column(scale=3):
+                chatbot = gr.Chatbot(
+                    value=[{"role": "assistant",
+                            "content": "👋 欢迎使用 AI 编码代理！请在右侧输入需求并点击启动按钮。"}],
+                    label="执行日志",
+                    height=520,
+                    elem_id="agent-chatbot",
+                    
+                )
+                status_text = gr.Textbox(
+                    value="🟢 就绪",
+                    label="状态",
+                    interactive=False,
+                    elem_id="status-text",
+                )
+
+                progress_bar = gr.HTML(
+                    value='<div style="margin:6px 0;font-size:12px;color:#555">⏳ 等待启动...</div>'
+                          '<div style="width:100%;background:#e8e8e8;border-radius:6px;height:14px">'
+                          '<div style="width:0%;background:#1677ff;height:14px;border-radius:6px"></div>'
+                          '</div>',
+                    elem_id="progress-bar",
+                )
+
+                result_md = gr.Markdown(
+                    "### 🤖 AI 编码代理\n输入需求后点击 **▶️ 启动任务** 按钮开始",
+                    elem_id="result-area",
+                )
+
+            # 右栏：控制台 + 介入面板
+            with gr.Column(scale=1, elem_id="control-panel"):
+                gr.Markdown("### ⚙️ 控制台")
+
+                user_input = gr.Textbox(
+                    label="📝 任务需求",
+                    lines=3,
+                    placeholder="例如：用 Python 写一个数独游戏\n或：写一个 Flask 学生成绩管理系统",
+                )
+                with gr.Row():
+                    resume_dropdown = gr.Dropdown(
+                        label="🆔 断点续传",
+                        choices=[],
+                        value=None,
+                        allow_custom_value=True,
+                        scale=5,
+                        filterable=True,
+                    )
+                    refresh_sessions_btn = gr.Button(
+                        "🔄", size="sm", variant="secondary", scale=1,
+                        min_width=40,
+                    )
+                start_btn = gr.Button(
+                    "▶️ 启动任务",
+                    variant="primary",
+                    size="lg",
+                    elem_id="start-btn",
+                )
+
+                gr.Markdown("---")
+
+                # 需求澄清面板（默认隐藏）
+                with gr.Column(visible=False) as clarify_panel:
+                    gr.Markdown("### 🤔 需求澄清")
+                    clarify_question = gr.Markdown("")
+                    clarify_input = gr.Textbox(
+                        label="请补充信息",
+                        lines=2,
+                        placeholder="输入补充说明...",
+                    )
+                    clarify_btn = gr.Button("📤 提交补充", variant="secondary")
+
+                # 人工介入面板（默认隐藏）
+                with gr.Column(visible=False, elem_id="intervene-panel") as intervene_panel:
+                    gr.Markdown("### ⚠️ 人工决策")
+                    intervene_content = gr.HTML(
+                        value="",
+                        elem_id="intervene-content",
+                    )
+
+                    intervene_action = gr.Radio(
+                        choices=["继续执行", "强制提交", "跳过任务", "修改需求"],
+                        label="选择操作",
+                        value="继续执行",
+                    )
+                    customize_input = gr.Textbox(
+                        label="自定义修改内容（仅「修改需求」时有效）",
+                        lines=3,
+                        visible=False,
+                        placeholder="输入修改后的需求或补充指示...",
+                    )
+                    intervene_btn = gr.Button(
+                        "🛠️ 执行决策",
+                        variant="secondary",
+                        size="lg",
+                    )
+
+        # 统一输出列表（9 个）
+        OUTPUTS = [
+            chatbot, agent_state, status_text,
+            task_progress, file_tree,
+            clarify_panel, intervene_panel, intervene_content,
+            progress_bar,
+        ]
+
+        # 事件绑定
+        start_btn.click(
+            fn=on_start,
+            inputs=[user_input, resume_dropdown],
+            outputs=OUTPUTS,
+        )
+
+        clarify_btn.click(
+            fn=on_clarify,
+            inputs=[clarify_input, agent_state, thread_id_state],
+            outputs=OUTPUTS,
+        )
+
+        intervene_action.change(
+            fn=on_action_change,
+            inputs=[intervene_action],
+            outputs=[customize_input],
+        )
+
+        intervene_btn.click(
+            fn=on_intervene,
+            inputs=[
+                intervene_action, customize_input,
+                agent_state, thread_id_state, is_interrupt_state,
+            ],
+            outputs=OUTPUTS,
+        )
+
+        refresh_btn.click(
+            fn=lambda: list_workspace_files(),
+            inputs=[],
+            outputs=[file_tree],
+        )
+
+        refresh_sessions_btn.click(
+            fn=lambda: list_sessions(),
+            inputs=[],
+            outputs=[resume_dropdown],
+        )
+
+        # 页面加载时自动填充历史会话列表
+        demo.load(
+            fn=lambda: list_sessions(),
+            inputs=[],
+            outputs=[resume_dropdown],
+        )
+
+    return demo

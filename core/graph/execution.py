@@ -30,9 +30,9 @@
       ↓ (还有 pending)──→ react_worker (循环处理下一个子任务)
       ↓ (全在 testing/finished)──→ END
 
-【ReAct Worker vs 旧 Worker】
-    旧 worker_node: 单次 LLM 调用生成代码，无工具，无自检
-    ReAct worker:   think→act→observe 循环，4 个真实工具，最多 7 轮自纠错
+【ReAct Worker】
+    think→act→observe 循环，10 个工具，最多 7 轮自纠错。
+    无论简单或复杂任务，统一走 ReAct 节点，保证代码质量和可修复性。
 
 【使用方式】
     from core.graph.execution import build_execution_subgraph
@@ -48,7 +48,6 @@ from core.state import AgentState
 from core.nodes.analyzer import analyzer_node
 from core.nodes.scheduler import scheduler_node, install_deps_node
 from core.nodes.react_worker import build_react_worker_subgraph
-from core.nodes.worker import worker_node
 from core.logger import logger
 
 USE_REACT_WORKER = True
@@ -152,24 +151,6 @@ def route_after_worker(state: AgentState) -> str:
 
 
 # ==========================================================================
-# scheduler 之后的路由：简单任务走快速通道
-# ==========================================================================
-
-def route_after_scheduler(state: AgentState) -> str:
-    """
-    scheduler 之后的分叉：
-    - 简单任务 → simple_worker（单次 LLM 代码生成，跳过 ReAct 循环）
-    - 复杂任务 → worker（ReAct 循环，带工具调用）
-    """
-    planning = state.get("planning")
-    if planning and planning.task_complexity == "simple":
-        logger.info("[执行子图] 简单任务，使用单次代码生成（跳过 ReAct 循环）")
-        return "simple_worker"
-    logger.info("[执行子图] 复杂任务，使用 ReAct Worker")
-    return "worker"
-
-
-# ==========================================================================
 # 构建执行子图
 # ==========================================================================
 
@@ -204,11 +185,9 @@ def build_execution_subgraph(checkpointer=None):
         workflow.add_node("worker", react_subgraph)
         logger.info("[执行子图] 使用 ReAct Worker（think→act→observe 循环）")
     else:
+        from core.nodes.worker import worker_node
         workflow.add_node("worker", worker_node)
         logger.info("[执行子图] 使用旧版 Worker（单次 LLM 代码生成）")
-
-    # 简单任务快速通道（单次代码生成，无 ReAct 循环）
-    workflow.add_node("simple_worker", worker_node)
 
     # ---- 入口路由 ----
     workflow.set_conditional_entry_point(
@@ -235,29 +214,12 @@ def build_execution_subgraph(checkpointer=None):
     # ---- scheduler → install_deps ----
     workflow.add_edge("scheduler", "install_deps")
 
-    # ---- install_deps → 按复杂度分叉进入 worker ----
-    workflow.add_conditional_edges(
-        "install_deps",
-        route_after_scheduler,
-        {
-            "simple_worker": "simple_worker",
-            "worker": "worker"
-        }
-    )
+    # ---- install_deps → 统一进入 ReAct Worker ----
+    workflow.add_edge("install_deps", "worker")
 
     # ---- worker 后分叉（循环核心） ----
     workflow.add_conditional_edges(
         "worker",
-        route_after_worker,
-        {
-            "worker": "worker",
-            "end": END
-        }
-    )
-
-    # ---- simple_worker 后分叉（同 worker，支持重试时进 ReAct） ----
-    workflow.add_conditional_edges(
-        "simple_worker",
         route_after_worker,
         {
             "worker": "worker",

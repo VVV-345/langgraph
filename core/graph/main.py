@@ -100,6 +100,7 @@ def route_after_sandbox(state: AgentState) -> str:
     sandbox 之后的分叉——主图的核心决策点：
 
     沙盒刚测完子任务，结果可能是通过或失败：
+    0. react_blocked（沙盒失败直接人工介入）→ end
     1. 重试次数超限（≥max_retry_per_task/任务）→ 强制终止，标记失败
     2. testing → 优先清空验证队列，让沙盒连续测完
     3. pending（含 failed + not_started）→ 验证队列清空后统一打回 executor
@@ -109,6 +110,10 @@ def route_after_sandbox(state: AgentState) -> str:
     如果 pending（失败待修复）优先，executor 可能因上游还在 testing 而空转一轮；
     testing 优先则先让沙盒把能过的都过了，解锁下游依赖，executor 有更多工作可做。
     """
+    if state.get("react_blocked", False):
+        logger.info("[主图路由] 沙盒验证失败，退出主图等待人工介入")
+        return "end"
+
     plan_box = state.get("planning")
     exec_box = state.get("execution")
 
@@ -243,7 +248,7 @@ def build_master_graph(checkpointer=None):
     workflow.add_node("executor", exec_subgraph)
     workflow.add_node("sandbox", sandbox_subgraph)
     workflow.add_node("integrator", integrator_node)
-    workflow.add_node("output", output_node)
+    workflow.add_node("output_writer", output_node)
     workflow.add_node("reviewer", reviewer_node)
 
     workflow.set_entry_point("executor")
@@ -259,14 +264,15 @@ def build_master_graph(checkpointer=None):
         }
     )
 
-    # sandbox → executor / sandbox / integrator（核心决策点）
+    # sandbox → executor / sandbox / integrator / end（测试失败人工介入）
     workflow.add_conditional_edges(
         "sandbox",
         route_after_sandbox,
         {
             "executor": "executor",
             "sandbox": "sandbox",
-            "integrator": "integrator"
+            "integrator": "integrator",
+            "end": END
         }
     )
 
@@ -276,12 +282,12 @@ def build_master_graph(checkpointer=None):
         route_after_integrator,
         {
             "executor": "executor",
-            "output": "output"
+            "output": "output_writer"
         }
     )
 
     # output → reviewer（总是执行，复盘内部处理降级）
-    workflow.add_edge("output", "reviewer")
+    workflow.add_edge("output_writer", "reviewer")
 
     # reviewer → END
     workflow.add_edge("reviewer", END)

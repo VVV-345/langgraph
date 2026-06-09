@@ -54,10 +54,14 @@ class ExperienceStore:
         self._retriever = None
         self._connected = False
 
-        self._qdrant_path = os.getenv("QDRANT_PATH", os.path.join(
+        # 默认路径：魔塔环境自动使用 /data/ 持久存储，本地用项目目录
+        _default_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
             "qdrant_data"
-        ))
+        )
+        if os.path.isdir("/data") and not os.getenv("QDRANT_PATH"):
+            _default_path = "/data/qdrant_data"
+        self._qdrant_path = os.getenv("QDRANT_PATH", _default_path)
 
     # ======================================================================
     # 连接管理
@@ -158,12 +162,14 @@ class ExperienceStore:
             }
 
             doc = Document(page_content=page_content, metadata=metadata)
-            doc_id = metadata["session_id"]
+            # Qdrant 点 ID 必须是标准 UUID 格式，不能直接使用 session_id
+            doc_id = str(uuid.uuid4())
 
             self._vector_store.add_documents([doc], ids=[doc_id])
 
             logger.info(
-                f"[Qdrant] ✅ 经验已写入 (session={doc_id}, "
+                f"[Qdrant] ✅ 经验已写入 (doc_id={doc_id}, "
+                f"session={metadata['session_id']}, "
                 f"success_rate={execution_result.get('success_rate', 0):.0%})"
             )
             return True
