@@ -1,0 +1,64 @@
+/* 1. 整个页面最外层全局底色 */
+body {
+    background-color: #0c0e14 !important;
+    color: #fefefe !important;
+    font-size: 14px !important;
+    -webkit-font-smoothing: antialiased !important;
+}
+
+/* 2. 左侧整栏：任务进度+沙盒文件（把原来的纯白背景换成深灰色） */
+div[class*="column"]:first-child {
+    background-color: #1d212b !important; /* 侧边栏深灰，不再刺眼纯白 */
+    color: #ffffff !important; /* 侧边栏所有文字强制纯白 */
+}
+
+/* 3. 任务进度板块内部盒子 */
+#file-tree-panel, .task-progress-box {
+    background: transparent !important; /* 继承父级深灰，不再叠加白色 */
+    color: #fff !important;
+    padding: 10px;
+}
+
+/* 4. 沙盒文件里的深色子框（(工作区为空)那块灰色方块） */
+.workspace-container, div:has-text("(工作区为空)") {
+    background-color: #2c3240 !important;
+    color: #ffffff !important; /* 框内文字拉满亮度 */
+}
+
+/* 5. 中间执行日志大面板 */
+#code-viewer {
+    background-color: #141925 !important;
+    border: 1px solid #333a4a !important;
+}
+#code-viewer textarea {
+    background: #141925 !important;
+    color: #f8f8f8 !important;
+    font-family: Fira Code, Consolas, monospace;
+    line-height: 1.6;
+}
+
+/* 6. 底部状态栏区域 */
+.status-bar {
+    background-color: #1f2430 !important;
+    color: #fff !important;
+}
+
+/* 7. 紫色标签按钮（执行日志、状态小标签） */
+button:has-text("执行日志"), button:has-text("状态") {
+    background: #553cd1 !important;
+    color: white !important;
+}
+
+/* 警示脉冲动画保留 */
+.intervene-active {
+    border: 2px solid #ff5252 !important;
+    box-shadow: 0 0 12px rgba(255,82,82,0.4);
+    background: #27151a !important;
+    color: #fff !important;
+    animation: pulse-border 2s infinite;
+}
+@keyframes pulse-border {
+    0% { box-shadow: 0 0 4px rgba(255,82,82,0.2); }
+    50% { box-shadow: 0 0 16px rgba(255,82,82,0.55); }
+    100% { box-shadow: 0 0 4px rgba(255,82,82,0.2); }
+}

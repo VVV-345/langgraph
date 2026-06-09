@@ -1,16 +1,34 @@
 # =============================================================================
-# 自主 AI 编码代理 —— 核心依赖
+# 自主 AI 编码代理 —— 全部依赖
 # =============================================================================
 # 安装方式：
 #   pip install -r requirements.txt
 #
-# 注意：langchain-huggingface 是可选的，仅在使用本地嵌入模型时需要。
-# 如需本地嵌入，取消注释下面这行：
-# langchain-huggingface>=0.1
+# 可选依赖（按需取消注释）：
+#   langchain-huggingface  — 本地嵌入模型（bge-m3 等）
+#   modelscope-studio       — 魔塔 Space SDK（部署到魔塔时需要）
 # =============================================================================
 
+# ── 核心框架 ──
 python-dotenv>=1.0
+pydantic>=2.0
+
+# ── LangChain 生态 ──
 langchain-core>=0.3
 langgraph>=0.2
 langchain-openai>=0.2
-pydantic>=2.0
+langchain-community>=0.3
+langchain-text-splitters>=0.3
+
+# ── 向量存储（Qdrant 本地模式） ──
+qdrant-client>=1.9
+langchain-qdrant>=0.1
+
+# ── Web UI ──
+gradio>=5.0
+
+# ── 可选：本地嵌入模型 ──
+# langchain-huggingface>=0.1
+
+# ── 可选：魔塔部署 ──
+# modelscope-studio

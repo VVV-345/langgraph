@@ -1,0 +1,11 @@
+# =============================================================================
+# HuggingFace Spaces 部署依赖
+# 安装方式：pip install -r ui/requirements.txt
+# =============================================================================
+
+gradio>=5.0
+python-dotenv>=1.0
+langchain-core>=0.3
+langgraph>=0.2
+langchain-openai>=0.2
+pydantic>=2.0

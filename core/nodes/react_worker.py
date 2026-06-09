@@ -49,7 +49,7 @@ from core.logger import logger
 
 load_dotenv()
 
-MAX_REACT_ROUNDS = 10
+MAX_REACT_ROUNDS = 7
 
 # ── 截断常量（防止 LLM 上下文窗口被大文件撑爆）────────────────────
 SNAPSHOT_HEAD = 15000       # 文件快照：头部保留字符数
@@ -394,9 +394,9 @@ def think_node(state: AgentState):
 
     react_history = state.get("react_history", [])
 
-    # ── 第 8 轮起物理裁剪工具列表：只允许写入 + 修改 + 提交 ──
+    # ── 第 6 轮起物理裁剪工具列表：只允许写入 + 修改 + 提交 ──
     allowed_tools = ALL_TOOLS
-    if round_num >= 8:
+    if round_num >= 6:
         logger.warning(f"[ReAct-Think] 🚨 第 {round_num} 轮触发工具强制裁剪！仅保留 write/edit/submit")
         allowed_tools = [t for t in ALL_TOOLS if t.name in ["write_file", "edit_file", "submit_task"]]
 
@@ -452,15 +452,17 @@ def think_node(state: AgentState):
             "你是一个编程助手，运行在 Linux Docker 容器中。\n"
             "工作目录是 /workspace，所有文件操作都相对于此目录。\n"
             "⚡ 核心规则：\n"
-            "  1. 【严禁过度验证】：一旦你修改完毕，绝对不要再调用 read_file 去重复检查！\n"
+            "  1. 【沙盒非交互】：代码在无标准输入环境下运行，严禁使用 input()！\n"
+            "    获取用户参数请用 argparse 解析命令行参数或 sys.argv。\n"
+            "  2. 【严禁过度验证】：一旦你修改完毕，绝对不要再调用 read_file 去重复检查！\n"
             "    你刚写入的代码已在上方的【📂 本子任务当前文件状态】中精确展示，直接看顶部即可！\n"
-            "  2. 【严禁自己测试】：严禁启动 web 服务或运行脚本自行验证！\n"
+            "  3. 【严禁自己测试】：严禁启动 web 服务或运行脚本自行验证！\n"
             "    代码的运行测试、校验和服务启动将由后续的【沙盒节点】自动完成，你只负责写代码。\n"
-            "  3. 【立刻交卷】：只要核心逻辑落盘，在同一轮或下一轮立刻调用 submit_task 交付！\n"
+            "  4. 【立刻交卷】：只要核心逻辑落盘，在同一轮或下一轮立刻调用 submit_task 交付！\n"
         )
         system_messages = [SystemMessage(content=base_system_content)]
 
-        if round_num >= 7:
+        if round_num >= 5:
             system_messages.append(SystemMessage(content=(
                 f"⚠️ 核心警告：当前子任务执行已达第 {round_num}/{MAX_REACT_ROUNDS} 轮！"
                 "非核心读取工具（如 read_file/list_directory/web_search）已被系统物理禁用！"
