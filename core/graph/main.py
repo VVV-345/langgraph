@@ -79,14 +79,18 @@ def route_after_executor(state: AgentState) -> str:
     """
     executor 之后的分叉：
 
-    - ReAct 阻塞（需人工介入）→ 直接退出主图，交 main.py 处理
+    - 需求不清晰（需用户补充）→ 退出主图，等待澄清
+    - ReAct 阻塞（需人工介入）→ 直接退出主图，交 pipeline 处理
     - 有 "testing" 任务 → 送入沙盒验证
     - 无 "testing" 任务（全部 finished）→ 大结局
     """
+    plan_box = state.get("planning")
+    if plan_box and plan_box.need_clarification:
+        logger.info("[主图路由] 需求不清晰，退出主图等待用户补充")
+        return "end"
     if state.get("react_blocked", False):
         logger.info("[主图路由] ReAct 阻塞需人工介入，退出主图")
         return "end"
-    plan_box = state.get("planning")
     for t in plan_box.task_plan:
         if t.status == "testing":
             logger.info("[主图路由] 有待测试的代码，送入沙盒验证")

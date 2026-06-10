@@ -8,6 +8,7 @@ ui_helpers.py —— 显示格式化 & 辅助工具函数
 """
 
 import os
+import shutil
 
 from .local_sandbox import _LOCAL_WORKSPACE
 
@@ -16,10 +17,10 @@ from .local_sandbox import _LOCAL_WORKSPACE
 # 断点续传——枚举历史会话
 # ==========================================================================
 
-def get_session_list(checkpointer, app_graph) -> list:
+def get_session_list(checkpointer, app_graph, show_completed: bool = False) -> list:
     """
     从 MemorySaver 中枚举所有历史会话，返回 [(label, thread_id), ...]。
-    按最近优先排序。
+    按最近优先排序。默认隐藏已完成任务。
     """
     items = []
     if not hasattr(checkpointer, "storage"):
@@ -43,6 +44,7 @@ def get_session_list(checkpointer, app_graph) -> list:
 
         planning = state.get("planning")
         progress = ""
+        all_finished = False
         if planning and planning.task_plan:
             done = sum(1 for t in planning.task_plan if t.status == "finished")
             fail = sum(1 for t in planning.task_plan if t.status == "failed")
@@ -51,17 +53,26 @@ def get_session_list(checkpointer, app_graph) -> list:
             if fail > 0:
                 progress += f", {fail} 失败"
             progress += ")"
+            all_finished = (done == total and total > 0)
 
         blocked = state.get("react_blocked", False)
         need_clarify = planning.need_clarification if planning else False
         tag = ""
-        if blocked:
+        if all_finished:
+            tag = " ✅已完成"
+        elif blocked:
             tag = " ⚠️待决策"
         elif need_clarify:
             tag = " 🤔待澄清"
 
         label = f"[{tid[:16]}] {task_desc[:40]} {progress}{tag}"
-        items.append((label, tid))
+        items.append((label, tid, all_finished))
+
+    # 默认过滤已完成任务
+    if not show_completed:
+        items = [(label, tid) for label, tid, finished in items if not finished]
+    else:
+        items = [(label, tid) for label, tid, _ in items]
 
     return items
 
@@ -92,21 +103,67 @@ def _docker(cmd: str, timeout: int = 5) -> dict:
 # 工作区文件列表
 # ==========================================================================
 
-def list_workspace() -> str:
-    """列出工作区文件"""
+def get_file_list() -> list:
+    """返回工作区文件路径列表（纯字符串，供 Dropdown choices）"""
     w = _LOCAL_WORKSPACE
     if not os.path.isdir(w):
-        return "(工作区为空)"
-    lines = []
+        return ["(工作区为空)"]
+    choices = []
     for root, dirs, files in os.walk(w):
-        # 跳过隐藏目录
         dirs[:] = [d for d in dirs if not d.startswith(".")]
         for fn in files:
             if fn.startswith("."):
                 continue
             fp = os.path.relpath(os.path.join(root, fn), w)
-            lines.append(f"📄 {fp}")
-    return "\n".join(sorted(lines)[:50]) if lines else "(工作区为空)"
+            choices.append(fp)
+    return sorted(choices)[:100] if choices else ["(工作区为空)"]
+
+
+def list_workspace():
+    """列出工作区文件 → 返回 gr.Dropdown.update(choices=...)"""
+    import gradio as gr
+    return gr.update(choices=get_file_list(), value=None)
+
+
+def preview_file(filename: str) -> str:
+    """读取工作区文件内容，返回文本。大文件截断前 3000 行。"""
+    if not filename or filename == "(工作区为空)":
+        return "# 选择一个文件即可预览"
+    w = _LOCAL_WORKSPACE
+    filepath = os.path.join(w, filename)
+    real = os.path.realpath(filepath)
+    if not real.startswith(os.path.realpath(w)):
+        return "# ⛔ 不允许访问工作区外的文件"
+    if not os.path.isfile(filepath):
+        return f"# ⚠️ 文件不存在: {filename}"
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            lines = []
+            for i, line in enumerate(f):
+                if i >= 3000:
+                    lines.append(f"\n... (截断，文件共 {i+1}+ 行)")
+                    break
+                lines.append(line)
+            return "".join(lines)
+    except Exception as e:
+        return f"# ❌ 读取失败: {e}"
+
+
+def clear_workspace():
+    """清空工作区所有文件，返回更新后的文件列表"""
+    w = _LOCAL_WORKSPACE
+    if os.path.isdir(w):
+        for item in os.listdir(w):
+            item_path = os.path.join(w, item)
+            try:
+                if os.path.isfile(item_path) or os.path.islink(item_path):
+                    os.unlink(item_path)
+                elif os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
+            except Exception:
+                pass
+    import gradio as gr
+    return gr.update(choices=get_file_list(), value=None)
 
 
 # ==========================================================================
@@ -274,3 +331,93 @@ def build_summary(state: dict) -> str:
             lines.append(f"  - ... 共 {len(output_ctx.files_written)} 个文件")
 
     return "\n".join(lines)
+
+
+# ==========================================================================
+# 向量模型（Embedding）管理
+# ==========================================================================
+
+_embeddings = None
+_embed_state = {"status": "not_loaded", "message": "未加载"}
+
+
+def get_embed_status() -> str:
+    """返回 embedding 模型状态 HTML 卡片"""
+    s = _embed_state
+    color = {
+        "not_loaded": "#888",
+        "loading": "#fa8c16",
+        "ready": "#52c41a",
+        "error": "#ff4d4f",
+    }.get(s["status"], "#888")
+    icon = {
+        "not_loaded": "⚪",
+        "loading": "🟠",
+        "ready": "🟢",
+        "error": "🔴",
+    }.get(s["status"], "⚪")
+    return (
+        f'<div style="font-size:12px;padding:4px 8px;'
+        f'border:1px solid {color};border-radius:4px;color:#1a1a1a">'
+        f'{icon} <b>向量模型:</b> {s["message"]}</div>'
+    )
+
+
+def load_embedding_model(mode: str, model_path: str = "",
+                         base_url: str = "", api_key: str = "",
+                         model_name: str = "") -> str:
+    """
+    mode: "local" | "api"
+    加载 embedding 模型，存到模块全局变量，返回状态 HTML。
+    """
+    global _embeddings, _embed_state
+
+    _embed_state = {"status": "loading", "message": "加载中..."}
+
+    try:
+        if mode == "local":
+            if not model_path or not os.path.exists(model_path):
+                _embed_state = {"status": "error",
+                                "message": f"路径不存在: {model_path}"}
+                return get_embed_status()
+            from langchain_huggingface import HuggingFaceEmbeddings
+            _embeddings = HuggingFaceEmbeddings(
+                model_name=model_path,
+                model_kwargs={"device": "cpu"},
+                encode_kwargs={"normalize_embeddings": True},
+            )
+            _embed_state = {"status": "ready",
+                            "message": f"本地: {os.path.basename(model_path)}"}
+
+        elif mode == "api":
+            if not base_url or not api_key:
+                _embed_state = {"status": "error",
+                                "message": "缺少 API 地址或密钥"}
+                return get_embed_status()
+            from langchain_openai import OpenAIEmbeddings
+            _embeddings = OpenAIEmbeddings(
+                model=model_name or "text-embedding-3-small",
+                base_url=base_url,
+                api_key=api_key,
+            )
+            _embed_state = {"status": "ready",
+                            "message": f"API: {model_name or 'text-embedding-3-small'}"}
+
+        else:
+            _embed_state = {"status": "error",
+                            "message": f"未知模式: {mode}"}
+
+    except ImportError as e:
+        _embed_state = {"status": "error",
+                        "message": f"缺少依赖: {e}"}
+    except Exception as e:
+        _embed_state = {"status": "error",
+                        "message": f"失败: {str(e)[:80]}"}
+
+    return get_embed_status()
+
+
+def get_embeddings():
+    """供 analyzer/reviewer 获取已加载的 embedder"""
+    global _embeddings
+    return _embeddings

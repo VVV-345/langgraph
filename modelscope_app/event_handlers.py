@@ -25,7 +25,7 @@ from .ui_helpers import (
     build_error_html,
     build_thought_html,
 )
-from .pipeline import stream_and_check, _progress_bar as _pb
+from .pipeline import stream_and_check, _blocked, _progress_bar as _pb
 
 
 # ==========================================================================
@@ -87,12 +87,50 @@ def on_start(app_graph, user_request: str, resume_id: str):
         state = saved.values
         thread_id = resume_id
 
+        # ── 守卫：已完成任务不可续传 ──
+        planning_check = state.get("planning")
+        exec_check = state.get("execution")
+        if planning_check and planning_check.task_plan:
+            tasks = planning_check.task_plan
+            all_done = all(t.status == "finished" for t in tasks)
+            if all_done and exec_check and getattr(exec_check, "all_tasks_completed", False):
+                yield _make_outputs(
+                    [{"role": "assistant",
+                      "content": "✅ 该任务已执行完毕，无需续传。请直接提交新任务。"}],
+                    state, "✅ 任务已完成",
+                    task_progress_html(state), list_workspace(),
+                    gr.update(visible=False), gr.update(visible=False),
+                    "### ✅ 任务已完成\n\n所有子任务均已成功执行，无需断点续传。"
+                    "\n\n想开新任务请在输入框填写需求后点击启动。",
+                    _empty_progress(),
+                )
+                return
+        # ── 守卫结束 ──
+
+        # ── 检测：如果上次是因需求不清晰而暂停，直接展示澄清面板 ──
+        plan_box = state.get("planning")
+        if plan_box and plan_box.need_clarification:
+            q = plan_box.clarification_question or "请补充更多需求细节"
+            logger.info(f"[UI续传] 检测到待澄清状态，直接展示澄清面板: {q[:80]}")
+            chat = [
+                {"role": "assistant", "content": f"🔄 从断点恢复 (thread_id: `{thread_id}`)"},
+                {"role": "assistant", "content": f"🤔 {q}"},
+            ]
+            yield _make_outputs(
+                chat, state, "等待补充信息...",
+                task_progress_html(state), list_workspace(),
+                gr.update(visible=False), gr.update(visible=False),
+                f"### 🚀 流水线断点恢复\n\n需要补充信息",
+                _pb(5, "⏳ 等待补充"),
+            )
+            yield _blocked(chat, state, "等待补充信息...", "clarify", q)
+            return
+
         exec_box = state.get("execution")
         if exec_box:
             exec_box.retry_count = 0
             exec_box.error_trace = ""
             exec_box.all_tasks_completed = False
-        plan_box = state.get("planning")
         if plan_box:
             plan_box.need_clarification = False
             plan_box.clarification_question = ""

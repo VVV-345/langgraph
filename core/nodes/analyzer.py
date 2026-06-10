@@ -38,6 +38,12 @@ def _get_rag_store() -> ExperienceStore | None:
     if _rag_store is not None:
         return _rag_store
 
+    # 快速跳过：未配置任何 embedding 时不做检索，避免 create_embedder() 抛异常拖慢启动
+    if not os.getenv("EMBEDDING_MODEL_PATH") and not os.getenv("EMBEDDING_BASE_URL") and not os.getenv("EMBEDDING_API_KEY"):
+        logger.info("[感知-RAG] 未配置 Embedding 模型，跳过历史经验检索")
+        _rag_store = None
+        return None
+
     try:
         embeddings = create_embedder()
         _rag_store = ExperienceStore(embeddings)
